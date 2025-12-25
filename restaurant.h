@@ -12,6 +12,7 @@
 
 #define NUM_CHEFS 3
 #define NUM_CUSTOMERS 5
+#define MAX_TABLES 15
 
 #define STATS_FILE "/tmp/restaurant_stats.dat"
 #define ORDERS_LOG_FILE "/tmp/restaurant_orders.log"
@@ -19,7 +20,7 @@
 #define MAX_ORDERS 100
 
 struct OrderMsg {
-    long type;      // 1=VIP, 2=Regular
+    long type;
     int table_id;
     int dish_id;    
     int amount;

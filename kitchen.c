@@ -114,13 +114,11 @@ void* chef_routine(void* arg) {
     char log_buf[256];
 
     while(1) {
-        // Priority: VIP (1) < Regular (2). -2 gets anything <= 2, smallest first.
         if (msgrcv(msg_queue_id, &order, sizeof(order) - sizeof(long), -2, 0) == -1) {
             if (errno == EIDRM || errno == EINVAL) break;
             continue;
         }
 
-        // Wait for ingredients
         sem_wait(&ingredients);
         
         const char* type_str = (order.type == 1) ? "VIP" : "REGULAR";
@@ -134,7 +132,6 @@ void* chef_routine(void* arg) {
         printf("\033[1;33m[Chef %d]\033[0m Cooking %s for Table %d (%s)...\n", 
                id, dish_str, order.table_id, type_str);
 
-        // Oven logic
         pthread_mutex_lock(&oven_mutex);
         long start = time(NULL);
         sleep(25); 
@@ -143,7 +140,6 @@ void* chef_routine(void* arg) {
         
         long duration = end - start;
 
-        // Print receipt
         printf("\033[1;36m--- BILL: Table %d | Cost: $20 | Time: %lds ---\033[0m\n", 
                order.table_id, duration);
         
@@ -173,7 +169,6 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Shared tracking
     key_t shm_key = ftok(QUEUE_KEY_PATH, SHM_PROJECT_ID);
     shm_id = shmget(shm_key, sizeof(struct KitchenStatus), 0666 | IPC_CREAT);
     if (shm_id == -1) {
@@ -193,13 +188,13 @@ int main(int argc, char *argv[]) {
     sem_init(&ingredients, 0, 8);
 
     log_activity("KITCHEN OPENED");
-    printf("Ready for orders.\nUse Ctrl+C to stop.\n\n");
 
     if (argc == 2) {
         int id = atoi(argv[1]);
         printf("Chef #%d active.\n", id);
         chef_routine(&id);
     } else {
+        printf("Ready for orders.\nUse Ctrl+C to stop.\n\n");
         pthread_t chefs[NUM_CHEFS];
         int ids[NUM_CHEFS];
         for(int i=0; i<NUM_CHEFS; i++) {

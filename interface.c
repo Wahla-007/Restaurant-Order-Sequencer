@@ -17,7 +17,6 @@ int shm_id;
 struct KitchenStatus *kitchen_status;
 volatile int keepRunning = 1;
 pthread_t refreshThread;
-pid_t kitchenPid = -1;
 
 void log_activity(const char *message) {
     logFile = fopen(LOG_FILE, "a");
@@ -64,15 +63,42 @@ void clear_screen() {
 }
 
 const char* get_status_str(const struct OrderTrackingData *o) {
-    if (o->is_completed) return "DONE";
-    if (o->oven_lock_status == 1) return "COOKING";
+    if (o->is_completed) return "\033[1;32mDONE\033[0m";
+    if (o->oven_lock_status == 1) return "\033[1;33mCOOKING\033[0m";
     return "QUEUED";
+}
+
+int get_valid_input(int min, int max, const char* prompt) {
+    int value;
+    char buffer[100];
+    
+    while (1) {
+        printf("%s", prompt);
+        if (fgets(buffer, sizeof(buffer), stdin) == NULL) {
+            return min; 
+        }
+        
+        char *endptr;
+        value = strtol(buffer, &endptr, 10);
+        
+        if (endptr == buffer || *endptr != '\n') {
+            printf("\033[1;31mInvalid input. Please enter a number.\033[0m\n");
+            continue;
+        }
+        
+        if (value < min || value > max) {
+            printf("\033[1;31mPlease choose between %d and %d.\033[0m\n", min, max);
+            continue;
+        }
+        
+        return value;
+    }
 }
 
 void show_interface() {
     clear_screen();
     printf("\n\033[1;36mRESTAURANT MANAGEMENT SYSTEM\033[0m\n");
-    printf("═══════════════════════════════════════════════════════════════════════════\n\n");
+    printf("\033[1;36m═══════════════════════════════════════════════════════════════════════════\033[0m\n\n");
 
     pthread_mutex_lock(&statsMutex);
     load_stats();
@@ -88,22 +114,21 @@ void show_interface() {
     }
     pthread_mutex_unlock(&statsMutex);
 
-    printf("  >> STATISTICS\n");
-    printf("  ┌───────────────────────────────────────────────────────────────────────────┐\n");
+    printf("  \033[1m>> STATISTICS\033[0m\n");
+    printf("  \033[1;36m┌───────────────────────────────────────────────────────────────────────────┐\033[0m\n");
     if (stats.orders_received > 0) {
-    printf("  │ Total: %-4d        Done: %-4d        Pending: %-4d                    │\n",
+    printf("  \033[1;36m│\033[0m Total: %-4d        Done: \033[1;32m%-4d\033[0m        Pending: \033[1;33m%-4d\033[0m                    \033[1;36m│\033[0m\n",
            stats.orders_received, stats.orders_completed, 
            stats.orders_received - stats.orders_completed);
-    printf("  │ Rate: %5.1f%%       Avg: %3lds       Min/Max: %3ld/%-3ld               │\n",
+    printf("  \033[1;36m│\033[0m Rate: %5.1f%%       Avg: %3lds       Min/Max: %3ld/%-3ld               \033[1;36m│\033[0m\n",
                rate, avg, stats.min_time, stats.max_time);
     } else {
-        printf("│ No orders yet.                                                            │\n");
+        printf("  \033[1;36m│\033[0m No orders yet.                                                            \033[1;36m│\033[0m\n");
     }
-    printf("└───────────────────────────────────────────────────────────────────────────┘\n\n");
+    printf("  \033[1;36m└───────────────────────────────────────────────────────────────────────────┘\033[0m\n\n");
 
-    // VIP Section
-    printf("  >> VIP ORDERS\n");
-    printf("  ═══════════════════════════════════════════════════════════════════════\n");
+    printf("  \033[1;35m>> VIP ORDERS\033[0m\n");
+    printf("  \033[1;36m═══════════════════════════════════════════════════════════════════════\033[0m\n");
     
     int count = 0;
     for (int i = 0; i < stats.orders_received && i < MAX_ORDERS; i++) {
@@ -118,14 +143,13 @@ void show_interface() {
                i+1, o->table_id,
                o->dish_id == 1 ? "Burger" : "Steak",
                get_status_str(o), t, 
-               o->oven_lock_status == 1 ? "BUSY" : "FREE");
+               o->oven_lock_status == 1 ? "\033[1;31mBUSY\033[0m" : "\033[1;32mFREE\033[0m");
     }
     if (!count) printf("    (empty)\n");
     printf("\n");
 
-    // Regular Section
-    printf("  >> REGULAR ORDERS\n");
-    printf("  ═══════════════════════════════════════════════════════════════════════\n");
+    printf("  \033[1;34m>> REGULAR ORDERS\033[0m\n");
+    printf("  \033[1;36m═══════════════════════════════════════════════════════════════════════\033[0m\n");
 
     count = 0;
     for (int i = 0; i < stats.orders_received && i < MAX_ORDERS; i++) {
@@ -140,13 +164,13 @@ void show_interface() {
                i+1, o->table_id,
                o->dish_id == 1 ? "Burger" : "Steak",
                get_status_str(o), t,
-               o->oven_lock_status == 1 ? "BUSY" : "FREE");
+               o->oven_lock_status == 1 ? "\033[1;31mBUSY\033[0m" : "\033[1;32mFREE\033[0m");
     }
     if (!count) printf("    (empty)\n");
     printf("\n");
 
-    printf("  >> LOGS\n");
-    printf("  ═══════════════════════════════════════════════════════════════════════\n");
+    printf("  \033[1m>> LOGS\033[0m\n");
+    printf("  \033[1;36m═══════════════════════════════════════════════════════════════════════\033[0m\n");
     
     FILE *f = fopen(LOG_FILE, "r");
     if (f) {
@@ -168,9 +192,9 @@ void show_interface() {
     }
     printf("\n");
     
-    printf("═══════════════════════════════════════════════════════════════════════════\n");
+    printf("\033[1;36m═══════════════════════════════════════════════════════════════════════════\033[0m\n");
     printf("  1. Order    2. Refresh    3. Exit\n");
-    printf("═══════════════════════════════════════════════════════════════════════════\n");
+    printf("\033[1;36m═══════════════════════════════════════════════════════════════════════════\033[0m\n");
 }
 
 void* refresh_routine(void* arg) {
@@ -180,9 +204,8 @@ void* refresh_routine(void* arg) {
 
 void place_order() {
     clear_screen();
-    printf("\nNEW ORDER\n");
+    printf("\n\033[1;32mNEW ORDER\033[0m\n");
 
-    // Check shared memory for kitchen status
     key_t shm_key = ftok(QUEUE_KEY_PATH, SHM_PROJECT_ID);
     int temp_shm = shmget(shm_key, sizeof(struct KitchenStatus), 0666);
     int is_running = 0;
@@ -201,22 +224,15 @@ void place_order() {
         return;
     }
 
-    int table, dish, vip;
-    
-    printf("Table ID (1-100): ");
-    if (scanf("%d", &table) != 1 || table < 1 || table > 100) {
-        printf("Invalid table.\n"); sleep(1); return;
-    }
+    char id_prompt[50];
+    snprintf(id_prompt, sizeof(id_prompt), "Table ID (1-%d): ", MAX_TABLES);
+    int table = get_valid_input(1, MAX_TABLES, id_prompt);
 
-    printf("\n1. Burger ($15)\n2. Steak ($25)\nChoice: ");
-    if (scanf("%d", &dish) != 1 || dish < 1 || dish > 2) {
-        printf("Invalid dish.\n"); sleep(1); return;
-    }
+    printf("\n1. Burger ($15)\n2. Steak ($25)\n");
+    int dish = get_valid_input(1, 2, "Choice: ");
 
-    printf("\n1. VIP\n2. Regular\nChoice: ");
-    if (scanf("%d", &vip) != 1 || vip < 1 || vip > 2) {
-        printf("Invalid priority.\n"); sleep(1); return;
-    }
+    printf("\n1. VIP\n2. Regular\n");
+    int vip = get_valid_input(1, 2, "Choice: ");
 
     struct OrderMsg msg;
     msg.table_id = table;
@@ -226,7 +242,7 @@ void place_order() {
     msg.timestamp = time(NULL);
 
     if (msgsnd(msgQueueId, &msg, sizeof(msg) - sizeof(long), IPC_NOWAIT) == -1) {
-        printf("Send failed.\n"); sleep(1); return;
+        printf("\033[1;31mSend failed.\033[0m\n"); sleep(1); return;
     }
 
     pthread_mutex_lock(&statsMutex);
@@ -250,7 +266,7 @@ void place_order() {
              (dish==1?"Burger":"Steak"), (vip==1?"VIP":"REG"));
     log_activity(logbuf);
 
-    printf("\nOrder placed.\n");
+    printf("\n\033[1;32mOrder placed.\033[0m\n");
     sleep(1);
 }
 
@@ -272,11 +288,7 @@ int main() {
     show_interface();
 
     while(1) {
-        int choice = 0;
-        if (scanf("%d", &choice) != 1) {
-            while (getchar() != '\n'); 
-            continue;
-        }
+        int choice = get_valid_input(1, 3, "\nSelect Option: ");
 
         if (choice == 1) {
             place_order();
@@ -285,6 +297,7 @@ int main() {
             show_interface();
         } else if (choice == 3) {
             keepRunning = 0;
+            pthread_cancel(refreshThread);
             pthread_join(refreshThread, NULL);
             
             msgctl(msgQueueId, IPC_RMID, NULL);
