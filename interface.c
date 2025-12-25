@@ -6,431 +6,292 @@
 #include <time.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <sys/shm.h>
 #include "restaurant.h"
 
 int msgQueueId;
 struct RestaurantStats stats;
 pthread_mutex_t statsMutex;
-FILE *statsFile;
 FILE *logFile;
+int shm_id;
+struct KitchenStatus *kitchen_status;
 volatile int keepRunning = 1;
 pthread_t refreshThread;
 pid_t kitchenPid = -1;
 
-void logActivity(const char *message) {
+void log_activity(const char *message) {
     logFile = fopen(LOG_FILE, "a");
-    if (logFile) {
-        time_t now = time(NULL);
-        struct tm *timeinfo = localtime(&now);
-        char timestamp[20];
-        snprintf(timestamp, sizeof(timestamp), "[%02d:%02d:%02d]",
-                timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
-        fprintf(logFile, "%s %s\n", timestamp, message);
-        fclose(logFile);
-    }
+    if (!logFile) return;
+    
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    
+    fprintf(logFile, "[%02d:%02d:%02d] %s\n", 
+            t->tm_hour, t->tm_min, t->tm_sec, message);
+    fclose(logFile);
 }
 
-void initStats() {
-    statsFile = fopen(STATS_FILE, "w");
-    if (statsFile) {
-        stats.orders_received = 0;
-        stats.orders_completed = 0;
-        stats.vip_orders = 0;
-        stats.regular_orders = 0;
-        stats.total_completion_time = 0;
-        stats.min_time = 0;
-        stats.max_time = 0;
-        memset(stats.orders, 0, sizeof(stats.orders));
-        fwrite(&stats, sizeof(struct RestaurantStats), 1, statsFile);
-        fclose(statsFile);
+void init_stats() {
+    FILE *f = fopen(STATS_FILE, "w");
+    if (f) {
+        memset(&stats, 0, sizeof(stats));
+        fwrite(&stats, sizeof(struct RestaurantStats), 1, f);
+        fclose(f);
     }
     
-    logFile = fopen(LOG_FILE, "w");
-    if (logFile) {
-        fclose(logFile);
+    f = fopen(LOG_FILE, "w");
+    if (f) fclose(f);
+}
+
+void load_stats() {
+    FILE *f = fopen(STATS_FILE, "r");
+    if (f) {
+        fread(&stats, sizeof(struct RestaurantStats), 1, f);
+        fclose(f);
     }
 }
 
-
-void readStats() {
-    statsFile = fopen(STATS_FILE, "r");
-    if (statsFile) {
-        fread(&stats, sizeof(struct RestaurantStats), 1, statsFile);
-        fclose(statsFile);
+void save_stats() {
+    FILE *f = fopen(STATS_FILE, "w");
+    if (f) {
+        fwrite(&stats, sizeof(struct RestaurantStats), 1, f);
+        fclose(f);
     }
 }
 
-
-void writeStats() {
-    statsFile = fopen(STATS_FILE, "w");
-    if (statsFile) {
-        fwrite(&stats, sizeof(struct RestaurantStats), 1, statsFile);
-        fclose(statsFile);
-    }
-}
-
-
-void clearScreen() {
+void clear_screen() {
     printf("\033[2J\033[H");
 }
 
-void placeOrderInteractive();
-void startService();
-void stopService();
-
-const char* getOrderStatus(struct OrderTrackingData *order) {
-    if (order->is_completed) {
-        return "DONE";
-    } else if (order->oven_lock_status == 1) {
-        return "COOKING";
-    } else {
-        return "QUEUED";
-    }
+const char* get_status_str(const struct OrderTrackingData *o) {
+    if (o->is_completed) return "DONE";
+    if (o->oven_lock_status == 1) return "COOKING";
+    return "QUEUED";
 }
 
-void displayMainInterface() {
-    clearScreen();
-    
-    pthread_mutex_lock(&statsMutex);
-    readStats();
-    pthread_mutex_unlock(&statsMutex);
-    
-    printf("\n");
-    printf("╔═══════════════════════════════════════════════════════════════════════════╗\n");
-    printf("║              RESTAURANT MANAGEMENT SYSTEM - LIVE VIEW                     ║\n");
-    printf("╚═══════════════════════════════════════════════════════════════════════════╝\n\n");
+void show_interface() {
+    clear_screen();
+    printf("\n\033[1;36mRESTAURANT MANAGEMENT SYSTEM\033[0m\n");
+    printf("═══════════════════════════════════════════════════════════════════════════\n\n");
 
-    printf("STATISTICS\n");
-    printf("┌───────────────────────────────────────────────────────────────────────────┐\n");
-    printf("│ Total: %2d | Done: %2d | Pending: %2d | VIP: %2d | Regular: %2d           │\n",
-           stats.orders_received, stats.orders_completed, 
-           stats.orders_received - stats.orders_completed,
-           stats.vip_orders, stats.regular_orders);
+    pthread_mutex_lock(&statsMutex);
+    load_stats();
     
+    float rate = 0;
+    if (stats.orders_received > 0) {
+        rate = ((float)stats.orders_completed / stats.orders_received) * 100;
+    }
+    
+    long avg = 0;
     if (stats.orders_completed > 0) {
-        long avgTime = stats.total_completion_time / stats.orders_completed;
-        float completionRate = ((float)stats.orders_completed / stats.orders_received) * 100;
-        printf("│ Rate: %.1f%% | Avg: %ld sec | Min: %ld | Max: %ld sec                   │\n",
-               completionRate, avgTime, stats.min_time, stats.max_time);
+        avg = stats.total_completion_time / stats.orders_completed;
+    }
+    pthread_mutex_unlock(&statsMutex);
+
+    printf("  >> STATISTICS\n");
+    printf("  ┌───────────────────────────────────────────────────────────────────────────┐\n");
+    if (stats.orders_received > 0) {
+    printf("  │ Total: %-4d        Done: %-4d        Pending: %-4d                    │\n",
+           stats.orders_received, stats.orders_completed, 
+           stats.orders_received - stats.orders_completed);
+    printf("  │ Rate: %5.1f%%       Avg: %3lds       Min/Max: %3ld/%-3ld               │\n",
+               rate, avg, stats.min_time, stats.max_time);
     } else {
-        printf("│ No orders completed yet                                                   │\n");
+        printf("│ No orders yet.                                                            │\n");
     }
     printf("└───────────────────────────────────────────────────────────────────────────┘\n\n");
 
-    printf("\n  >> \033[1;35mVIP ORDERS\033[0m - Priority Queue\n");
-    printf("  ═══════════════════════════════════════════════════════════════════════\n\n");
-
-    int vipCount = 0;
-    for (int i = 0; i < stats.orders_received && i < MAX_ORDERS; i++) {
-        struct OrderTrackingData *order = &stats.orders[i];
-        if (order->table_id == 0 || order->order_type != 1) continue;
-        
-        vipCount++;
-        const char *status = getOrderStatus(order);
-        long timeVal = order->is_completed ? order->completion_time : 
-                       (order->oven_lock_status == 1 ? 25 : 0);
-        const char *ovenStatus = order->oven_lock_status == 1 ? "LOCKED" : 
-                                 order->is_completed ? "FREE" : "WAIT";
-
-        printf("    #%-2d  Table %-3d  │  %-8s  │  %-10s  │  %3ld sec  │  Oven: %-6s\n",
-               i+1, order->table_id,
-               order->dish_id == 1 ? "Burger" : "Steak",
-               status, timeVal, ovenStatus);
-    }
-    
-    if (vipCount == 0) {
-        printf("    ~ No VIP orders at the moment ~\n");
-    }
-    printf("\n");
-
-    printf("  >> \033[1;34mREGULAR ORDERS\033[0m - Standard Queue\n");
-    printf("  ═══════════════════════════════════════════════════════════════════════\n\n");
-
-    int regCount = 0;
-    for (int i = 0; i < stats.orders_received && i < MAX_ORDERS; i++) {
-        struct OrderTrackingData *order = &stats.orders[i];
-        if (order->table_id == 0 || order->order_type != 2) continue;
-        
-        regCount++;
-        const char *status = getOrderStatus(order);
-        long timeVal = order->is_completed ? order->completion_time : 
-                       (order->oven_lock_status == 1 ? 25 : 0);
-        const char *ovenStatus = order->oven_lock_status == 1 ? "LOCKED" : 
-                                 order->is_completed ? "FREE" : "WAIT";
-
-        printf("    #%-2d  Table %-3d  │  %-8s  │  %-10s  │  %3ld sec  │  Oven: %-6s\n",
-               i+1, order->table_id,
-               order->dish_id == 1 ? "Burger" : "Steak",
-               status, timeVal, ovenStatus);
-    }
-    
-    if (regCount == 0) {
-        printf("    ~ No regular orders at the moment ~\n");
-    }
-    printf("\n");
-
-    printf("  >> \033[1;33mACTIVITY LOG\033[0m - Recent Events\n");
+    // VIP Section
+    printf("  >> VIP ORDERS\n");
     printf("  ═══════════════════════════════════════════════════════════════════════\n");
     
-    FILE *activityLog = fopen(LOG_FILE, "r");
-    if (!activityLog) {
-        printf("\n    ~ No activity yet. Waiting for orders... ~\n");
-    } else {
-        char lines[15][300];
-        int lineCount = 0;
+    int count = 0;
+    for (int i = 0; i < stats.orders_received && i < MAX_ORDERS; i++) {
+        struct OrderTrackingData *o = &stats.orders[i];
+        if (o->table_id == 0 || o->order_type != 1) continue;
         
-        char line[300];
-        while (fgets(line, sizeof(line), activityLog)) {
-            line[strcspn(line, "\n")] = 0;
-            
-            if (lineCount >= 15) {
-                for (int i = 0; i < 14; i++) {
-                    strcpy(lines[i], lines[i+1]);
-                }
-                strcpy(lines[14], line);
-            } else {
-                strcpy(lines[lineCount], line);
-                lineCount++;
+        count++;
+        long t = o->is_completed ? o->completion_time : 
+                 (o->oven_lock_status == 1 ? 25 : 0);
+                 
+        printf("    #%-2d  T%-3d  │ %-8s │ %-8s │ %3lds │ Oven: %s\n",
+               i+1, o->table_id,
+               o->dish_id == 1 ? "Burger" : "Steak",
+               get_status_str(o), t, 
+               o->oven_lock_status == 1 ? "BUSY" : "FREE");
+    }
+    if (!count) printf("    (empty)\n");
+    printf("\n");
+
+    // Regular Section
+    printf("  >> REGULAR ORDERS\n");
+    printf("  ═══════════════════════════════════════════════════════════════════════\n");
+
+    count = 0;
+    for (int i = 0; i < stats.orders_received && i < MAX_ORDERS; i++) {
+        struct OrderTrackingData *o = &stats.orders[i];
+        if (o->table_id == 0 || o->order_type != 2) continue;
+        
+        count++;
+        long t = o->is_completed ? o->completion_time : 
+                 (o->oven_lock_status == 1 ? 25 : 0);
+
+        printf("    #%-2d  T%-3d  │ %-8s │ %-8s │ %3lds │ Oven: %s\n",
+               i+1, o->table_id,
+               o->dish_id == 1 ? "Burger" : "Steak",
+               get_status_str(o), t,
+               o->oven_lock_status == 1 ? "BUSY" : "FREE");
+    }
+    if (!count) printf("    (empty)\n");
+    printf("\n");
+
+    printf("  >> LOGS\n");
+    printf("  ═══════════════════════════════════════════════════════════════════════\n");
+    
+    FILE *f = fopen(LOG_FILE, "r");
+    if (f) {
+        char lines[10][256];
+        int n = 0;
+        char buf[256];
+        
+        while (fgets(buf, sizeof(buf), f)) {
+            buf[strcspn(buf, "\n")] = 0;
+            if (n < 10) strcpy(lines[n++], buf);
+            else {
+                for(int j=0; j<9; j++) strcpy(lines[j], lines[j+1]);
+                strcpy(lines[9], buf);
             }
         }
         
-        printf("\n");
-        for (int i = 0; i < lineCount; i++) {
-            printf("    %s\n", lines[i]);
-        }
-        
-        if (lineCount == 0) {
-            printf("    ~ No activity yet. Waiting for orders... ~\n");
-        }
-        
-        fclose(activityLog);
+        for (int i=0; i<n; i++) printf("    %s\n", lines[i]);
+        fclose(f);
     }
     printf("\n");
-
-
+    
     printf("═══════════════════════════════════════════════════════════════════════════\n");
-    printf("  1. Place Order    2. Start Kitchen    3. Stop Service    4. Refresh    5. Exit\n");
+    printf("  1. Order    2. Refresh    3. Exit\n");
     printf("═══════════════════════════════════════════════════════════════════════════\n");
 }
 
-void* autoRefreshThread(void* arg) {
-    while(keepRunning) {
-        sleep(10);
-    }
+void* refresh_routine(void* arg) {
+    while(keepRunning) sleep(10);
     return NULL;
 }
 
-void placeOrderInteractive() {
-    clearScreen();
-    printf("\nPLACE NEW ORDER\n");
-    printf("═════════════════════════════════════════════════════════\n\n");
+void place_order() {
+    clear_screen();
+    printf("\nNEW ORDER\n");
 
-    int tableId, dishId, isVip;
+    // Check shared memory for kitchen status
+    key_t shm_key = ftok(QUEUE_KEY_PATH, SHM_PROJECT_ID);
+    int temp_shm = shmget(shm_key, sizeof(struct KitchenStatus), 0666);
+    int is_running = 0;
     
-    printf("Enter Table ID (1-100): ");
-    scanf("%d", &tableId);
+    if (temp_shm != -1) {
+        struct KitchenStatus *ks = (struct KitchenStatus*)shmat(temp_shm, NULL, 0);
+        if (ks != (void*)-1) {
+            is_running = ks->is_running;
+            shmdt(ks);
+        }
+    }
     
-    if (tableId < 1 || tableId > 100) {
-        printf("Invalid table ID!\n");
+    if (!is_running) {
+        printf("\n\033[1;31mKitchen offline. Start ./kitchen first.\033[0m\n");
         sleep(2);
         return;
     }
 
-    printf("\nSelect Dish:\n");
-    printf("1. Burger ($15)\n");
-    printf("2. Steak ($25)\n");
-    printf("Choice (1-2): ");
-    scanf("%d", &dishId);
-
-    if (dishId < 1 || dishId > 2) {
-        printf("Invalid dish selection!\n");
-        sleep(2);
-        return;
+    int table, dish, vip;
+    
+    printf("Table ID (1-100): ");
+    if (scanf("%d", &table) != 1 || table < 1 || table > 100) {
+        printf("Invalid table.\n"); sleep(1); return;
     }
 
-    printf("\nSelect Priority:\n");
-    printf("1. VIP (Processed First)\n");
-    printf("2. Regular\n");
-    printf("Choice (1-2): ");
-    scanf("%d", &isVip);
-
-    if (isVip < 1 || isVip > 2) {
-        printf("Invalid priority!\n");
-        sleep(2);
-        return;
+    printf("\n1. Burger ($15)\n2. Steak ($25)\nChoice: ");
+    if (scanf("%d", &dish) != 1 || dish < 1 || dish > 2) {
+        printf("Invalid dish.\n"); sleep(1); return;
     }
 
-    struct OrderMsg order;
-    order.table_id = tableId;
-    order.dish_id = dishId;
-    order.type = (isVip == 1) ? 1 : 2;
-    order.amount = 1;
-    order.timestamp = time(NULL);
+    printf("\n1. VIP\n2. Regular\nChoice: ");
+    if (scanf("%d", &vip) != 1 || vip < 1 || vip > 2) {
+        printf("Invalid priority.\n"); sleep(1); return;
+    }
 
-    if (msgsnd(msgQueueId, &order, sizeof(order) - sizeof(long), IPC_NOWAIT) == -1) {
-        printf("Failed to send order. Is the kitchen running?\n");
-        sleep(2);
-        return;
+    struct OrderMsg msg;
+    msg.table_id = table;
+    msg.dish_id = dish;
+    msg.type = (vip == 1) ? 1 : 2;
+    msg.amount = 1;
+    msg.timestamp = time(NULL);
+
+    if (msgsnd(msgQueueId, &msg, sizeof(msg) - sizeof(long), IPC_NOWAIT) == -1) {
+        printf("Send failed.\n"); sleep(1); return;
     }
 
     pthread_mutex_lock(&statsMutex);
-    readStats();
-    
+    load_stats();
     if (stats.orders_received < MAX_ORDERS) {
-        stats.orders[stats.orders_received].table_id = tableId;
-        stats.orders[stats.orders_received].dish_id = dishId;
-        stats.orders[stats.orders_received].order_type = (isVip == 1) ? 1 : 2;
-        stats.orders[stats.orders_received].timestamp = order.timestamp;
-        stats.orders[stats.orders_received].is_completed = 0;
-        stats.orders[stats.orders_received].completion_time = 0;
-        stats.orders[stats.orders_received].oven_lock_status = 0;
-        stats.orders[stats.orders_received].delivery_time = 25;
+        struct OrderTrackingData *o = &stats.orders[stats.orders_received];
+        o->table_id = table;
+        o->dish_id = dish;
+        o->order_type = (vip == 1) ? 1 : 2;
+        o->timestamp = msg.timestamp;
+        o->delivery_time = 25;
     }
-    
     stats.orders_received++;
-    if (isVip == 1) stats.vip_orders++;
-    else stats.regular_orders++;
-    writeStats();
+    if (vip == 1) stats.vip_orders++; else stats.regular_orders++;
+    save_stats();
     pthread_mutex_unlock(&statsMutex);
 
-    char logMsg[256];
-    snprintf(logMsg, sizeof(logMsg), 
-             "ORDER #%d: Table %d | %s | %s | PLACED",
-             stats.orders_received,
-             tableId, 
-             dishId == 1 ? "Burger" : "Steak",
-             (isVip == 1) ? "VIP" : "REGULAR");
-    logActivity(logMsg);
+    char logbuf[256];
+    snprintf(logbuf, sizeof(logbuf), "ORDER #%d: T%d | %s | %s",
+             stats.orders_received, table,
+             (dish==1?"Burger":"Steak"), (vip==1?"VIP":"REG"));
+    log_activity(logbuf);
 
-    printf("\n\033[1;32mOrder placed successfully!\033[0m\n");
-    printf("┌─────────────────────────────────┐\n");
-    printf("│ Order #%d\n", stats.orders_received);
-    printf("│ Table: %d\n", tableId);
-    printf("│ Dish: %s\n", dishId == 1 ? "Burger" : "Steak");
-    printf("│ Priority: %s\n", (isVip == 1) ? "VIP" : "Regular");
-    printf("│ Est. Time: 25 sec\n");
-    printf("└─────────────────────────────────┘\n");
-    printf("\nPress Enter to return to dashboard...\n");
-    getchar();
-    getchar();
-}
-
-void startService() {
-    clearScreen();
-    printf("\n\033[1;36mSTARTING RESTAURANT SERVICE\033[0m\n");
-    printf("═════════════════════════════════════════════════════════\n\n");
-
-    key_t key = ftok(QUEUE_KEY_PATH, PROJECT_ID);
-    msgQueueId = msgget(key, 0666 | IPC_CREAT);
-    
-    if (msgQueueId == -1) {
-        printf("Failed to create message queue!\n");
-        printf("\nPress Enter to continue...");
-        getchar();
-        getchar();
-        return;
-    }
-
-    initStats();
-    logActivity("RESTAURANT OPENED - Service Started");
-
-    printf("\033[1;32mMessage Queue created (ID: %d)\033[0m\n", msgQueueId);
-    printf("\033[1;32mStatistics initialized\033[0m\n");
-    
-    printf("\033[1;32mStarting kitchen chefs...\033[0m\n");
-    
-    kitchenPid = fork();
-    if (kitchenPid == 0) {
-        execl("./kitchen", "./kitchen", NULL);
-        printf("Failed to start kitchen. Make sure './kitchen' exists!\n");
-        exit(1);
-    } else if (kitchenPid > 0) {
-        sleep(1);
-        printf("Kitchen started (PID: %d)\n", kitchenPid);
-        printf("3 chefs are now ready to cook!\n");
-    } else {
-        printf("Failed to fork kitchen process!\n");
-    }
-    
-    printf("\nRestaurant is now fully operational!\n");
-    printf("\nPress Enter to continue...");
-    getchar();
-    getchar();
-}
-
-void stopService() {
-    clearScreen();
-    printf("\n\033[1;31mSTOPPING RESTAURANT SERVICE\033[0m\n");
-    printf("═════════════════════════════════════════════════════════\n\n");
-
-    if (kitchenPid > 0) {
-        printf("Stopping kitchen chefs...\n");
-        kill(kitchenPid, SIGTERM);
-        waitpid(kitchenPid, NULL, 0);
-        printf("Kitchen stopped\n");
-        kitchenPid = -1;
-    }
-
-    if (msgctl(msgQueueId, IPC_RMID, NULL) == -1) {
-        printf("Message queue not found or already removed.\n");
-    } else {
-        printf("Message queue destroyed\n");
-    }
-
-    logActivity("RESTAURANT CLOSED - Service Stopped");
-    printf("Service stopped successfully\n");
-    
-    printf("\nPress Enter to continue...");
-    getchar();
-    getchar();
+    printf("\nOrder placed.\n");
+    sleep(1);
 }
 
 int main() {
     pthread_mutex_init(&statsMutex, NULL);
     
     key_t key = ftok(QUEUE_KEY_PATH, PROJECT_ID);
-    msgQueueId = msgget(key, 0666);
+    msgQueueId = msgget(key, 0666 | IPC_CREAT);
     
     if (msgQueueId == -1) {
-        printf("Kitchen not running. Please start service first (Option 2).\n");
+        perror("msgget failed");
+        return 1;
     }
 
-    keepRunning = 1;
-    pthread_create(&refreshThread, NULL, autoRefreshThread, NULL);
+    init_stats();
+    log_activity("SERVICE STARTED");
 
-    displayMainInterface();
+    pthread_create(&refreshThread, NULL, refresh_routine, NULL);
+    show_interface();
 
     while(1) {
-        int choice;
-        scanf("%d", &choice);
+        int choice = 0;
+        if (scanf("%d", &choice) != 1) {
+            while (getchar() != '\n'); 
+            continue;
+        }
 
         if (choice == 1) {
-            placeOrderInteractive();
-            displayMainInterface();
+            place_order();
+            show_interface();
         } else if (choice == 2) {
-            startService();
-            displayMainInterface();
+            show_interface();
         } else if (choice == 3) {
-            stopService();
-            displayMainInterface();
-        } else if (choice == 4) {
-            displayMainInterface();
-        } else if (choice == 5) {
             keepRunning = 0;
             pthread_join(refreshThread, NULL);
             
-            if (kitchenPid > 0) {
-                kill(kitchenPid, SIGTERM);
-                waitpid(kitchenPid, NULL, 0);
-            }
-            
-            clearScreen();
-            printf("\nThank you for using Restaurant Management System!\n\n");
-            
+            msgctl(msgQueueId, IPC_RMID, NULL);
+            log_activity("SERVICE STOPPED");
 
-            FILE *lf = fopen(LOG_FILE, "w");
-            if (lf) fclose(lf);
-            
+            clear_screen();
+            printf("\nBye!\n\n");
             break;
         }
     }
