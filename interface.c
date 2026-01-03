@@ -16,6 +16,7 @@ FILE *logFile;
 int shm_id;
 struct KitchenStatus *kitchen_status;
 volatile int keepRunning = 1;
+pid_t kitchen_pid = -1;
 pthread_t refreshThread;
 
 void log_activity(const char *message) {
@@ -281,6 +282,20 @@ int main() {
         return 1;
     }
 
+    
+    kitchen_pid = fork();
+    if (kitchen_pid == -1) {
+        perror("fork failed");
+        return 1;
+    } else if (kitchen_pid == 0) {
+        
+        execl("./kitchen", "kitchen", NULL);
+        perror("exec failed");
+        exit(1);
+    }
+    
+    sleep(1);
+
     init_stats();
     log_activity("SERVICE STARTED");
 
@@ -300,6 +315,12 @@ int main() {
             pthread_cancel(refreshThread);
             pthread_join(refreshThread, NULL);
             
+            // Terminate kitchen child
+            if (kitchen_pid > 0) {
+                kill(kitchen_pid, SIGTERM);
+                waitpid(kitchen_pid, NULL, 0);
+            }
+
             msgctl(msgQueueId, IPC_RMID, NULL);
             log_activity("SERVICE STOPPED");
 
